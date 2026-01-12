@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>HC4 • Trocar senha</title>
+  <link rel="icon" href="assets/favicon.png"/>
+  <link rel="stylesheet" href="css/styles.css"/>
+</head>
+<body>
+  <div class="container">
+    <div class="topbar">
+      <div class="logo"><img src="assets/logo-hc4.png" alt="HC4"/></div>
+      <div>
+        <h1>Troca obrigatória de senha</h1>
+        <p>Por segurança, defina uma nova senha para continuar.</p>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:18px;max-width:520px">
+      <h2><span class="icon">🔒</span> Nova senha</h2>
+      <div class="row">
+        <div class="field">
+          <label>Nova senha</label>
+          <input id="newPass" type="password" minlength="6" placeholder="Mínimo 6 caracteres"/>
+        </div>
+        <div class="field">
+          <label>Confirmar senha</label>
+          <input id="newPass2" type="password" minlength="6" placeholder="Repita a senha"/>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="primary" id="btnSave">Salvar e entrar</button>
+      </div>
+      <p class="helper">Dica: use uma senha que você não reutiliza em outros sistemas.</p>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"><div class="msg"></div><div class="small"></div></div>
+  <div class="footer"><span id="footerUser"></span></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="js/config.js"></script>
+  <script src="js/supabaseClient.js"></script>
+  <script src="js/ui.js"></script>
+  <script>
+    (async ()=>{
+      const { data } = await sb.auth.getSession();
+      if(!data.session) location.href="login.html";
+      document.getElementById("footerUser").textContent = "Usuário: " + (data.session.user.email || "");
+      document.getElementById("btnSave").onclick = async ()=>{
+        const a = document.getElementById("newPass").value;
+        const b = document.getElementById("newPass2").value;
+        if(!a || a.length < 6){ toast("Senha deve ter no mínimo 6 caracteres."); return; }
+        if(a !== b){ toast("As senhas não conferem."); return; }
+        const { error } = await sb.auth.updateUser({ password: a });
+        if(error){ toast("Erro ao salvar senha", error.message); return; }
+        // marca flag no profile
+        await sb.from("profiles").update({ must_change_password:false }).eq("user_id", data.session.user.id);
+        toast("Senha atualizada!");
+        // redireciona conforme role
+        const { data: profile } = await sb.from("profiles").select("role").eq("user_id", data.session.user.id).single();
+        setTimeout(()=> location.href = (profile?.role==="ADMIN" ? "admin.html" : "form.html"), 700);
+      };
+    })();
+  </script>
+</body>
+</html>
