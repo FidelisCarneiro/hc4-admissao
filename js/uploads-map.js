@@ -1,0 +1,28 @@
+// js/uploads-map.js
+export const DOCS_ORDER = [
+  { code: "foto",        label: "Foto 3x4" },
+  { code: "rg",          label: "RG" },
+  { code: "cpf",         label: "CPF" },
+  { code: "titulo",      label: "Título de Eleitor" },
+  { code: "pis",         label: "PIS/PASEP" },
+  { code: "reservista",  label: "Certificado de Reservista" },
+  { code: "nascimento",  label: "Certidão de Nascimento" },
+  { code: "casamento",   label: "Certidão de Casamento" },
+  { code: "residencia",  label: "Comprovante de Residência" },
+  { code: "escolaridade",label: "Certificado de Escolaridade" },
+  { code: "ctps",        label: "CTPS" },
+  { code: "vacinacao",   label: "Carteira de Vacinação" },
+  { code: "sus",         label: "Cartão do SUS" },
+  { code: "curriculo",   label: "Currículo" },
+  { code: "certificado", label: "Certificados" },
+  { code: "cursos",      label: "Cursos" },
+  { code: "dados_banc",  label: "Dados Bancários" },
+  { code: "transporte",  label: "Cartão de Transporte" },
+  { code: "cnh",         label: "CNH" },
+  { code: "filhos_nasc", label: "Certidão de Nascimento dos Filhos" },
+  { code: "sus_dep",     label: "Cartão do SUS dos Dependentes" },
+  { code: "rgcpf_fam",   label: "RG e CPF (Cônjuge + Filhos)" },
+  { code: "vac_filhos",  label: "Caderneta de Vacinação (Filhos < 7)" },
+  { code: "esc_filhos",  label: "Comprovante Escolar (7 a 14)" },
+  { code: "conselho",    label: "Registro Conselho Profissional" }
+];
