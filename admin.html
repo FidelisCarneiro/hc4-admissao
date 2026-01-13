@@ -1,120 +1,118 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="pt-BR">
 <head>
-  <meta charset="UTF-8" />
+  <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>HC4 • Admin</title>
-  <link rel="stylesheet" href="css/style.css" />
-  <style>
-    .wrap { max-width: 1200px; margin: 0 auto; }
-    .toolbar { display:flex; gap:12px; flex-wrap:wrap; align-items:center; justify-content:space-between; margin: 14px 0; }
-    .search { flex:1; min-width:260px; display:flex; gap:10px; }
-    .search input { width:100%; padding:10px; border:1px solid #ddd; border-radius:10px; }
-    table { width:100%; border-collapse: collapse; background:#fff; border-radius:14px; overflow:hidden; }
-    th, td { padding:10px 12px; border-bottom:1px solid #eee; font-size: 14px; vertical-align: top; }
-    th { background:#f7f7f7; text-align:left; }
-    .badge { display:inline-block; padding:4px 8px; border-radius:999px; font-size:12px; background:#eee; }
-    .ok { background:#e7f7ec; }
-    .warn { background:#fff4e5; }
-    .bad { background:#ffe7e7; }
-    .actions { display:flex; gap:8px; flex-wrap:wrap; }
-    button { padding:8px 10px; border-radius:10px; border:1px solid #ddd; background:#fff; cursor:pointer; }
-    button.primary { background:#111; color:#fff; border-color:#111; }
-    button.danger { background:#b00020; color:#fff; border-color:#b00020; }
-    .modal { position:fixed; inset:0; background:rgba(0,0,0,.4); display:none; align-items:center; justify-content:center; padding:16px; }
-    .modal.open { display:flex; }
-    .card { background:#fff; width:min(920px, 100%); border-radius:16px; padding:16px; }
-    .grid { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
-    .grid label { display:block; font-size:12px; opacity:.75; margin-bottom:6px; }
-    .grid input, .grid textarea { width:100%; padding:10px; border:1px solid #ddd; border-radius:10px; }
-    .footer { display:flex; gap:10px; justify-content:flex-end; margin-top:12px; flex-wrap:wrap; }
-  </style>
+  <link rel="stylesheet" href="./css/style.css" />
+  <link rel="icon" href="./assets/logo-hc4.png" />
 </head>
 <body>
-  <div class="wrap">
-    <header style="display:flex;align-items:center;gap:14px;">
-      <img src="assets/logo.png" alt="HC4" style="height:54px" />
-      <div>
-        <h1 style="margin:0;">Painel Administrativo</h1>
-        <div style="opacity:.75;font-size:13px;">Submissões • rascunhos • envio • downloads</div>
+  <div class="bg-shapes"></div>
+
+  <main class="shell">
+    <header class="topbar">
+      <img class="logo" src="./assets/logo-hc4.png" alt="HC4" />
+      <div class="topbar-text">
+        <h1>Painel do Administrador</h1>
+        <p id="whoami">Carregando…</p>
+      </div>
+      <div class="topbar-actions">
+        <a class="btn" href="./form.html">Ir para Formulário</a>
+        <button class="btn" id="btnLogout">Sair</button>
       </div>
     </header>
 
-    <div class="toolbar">
-      <div class="search">
-        <input id="q" placeholder="Pesquisar por Nome ou CPF..." />
-        <button id="btnRefresh" class="primary">Atualizar</button>
+    <section class="card">
+      <div class="card-title">
+        <div class="icon-badge">👤</div>
+        <h2>Cadastrar usuário</h2>
       </div>
 
-      <div style="display:flex; gap:10px; align-items:center;">
-        <span style="opacity:.7;font-size:13px;" id="count">—</span>
-      </div>
-    </div>
+      <form id="createUserForm" class="grid grid-3">
+        <label class="field">
+          <span>Nome</span>
+          <input id="cu_name" required />
+        </label>
+        <label class="field">
+          <span>CPF (11 dígitos)</span>
+          <input id="cu_cpf" inputmode="numeric" maxlength="11" required />
+          <small class="hint">Senha inicial = 6 primeiros dígitos do CPF</small>
+        </label>
+        <label class="field">
+          <span>Perfil</span>
+          <select id="cu_role">
+            <option value="PREENCHEDOR" selected>PREENCHEDOR</option>
+            <option value="ADMIN">ADMIN</option>
+          </select>
+        </label>
 
-    <table>
-      <thead>
-        <tr>
-          <th>Nome</th>
-          <th>CPF</th>
-          <th>Nascimento</th>
-          <th>Status</th>
-          <th>Docs</th>
-          <th>Envio</th>
-          <th>Ações</th>
-        </tr>
-      </thead>
-      <tbody id="rows">
-        <tr><td colspan="7" style="opacity:.7;">Carregando...</td></tr>
-      </tbody>
-    </table>
-  </div>
+        <label class="field">
+          <span>Ativo?</span>
+          <select id="cu_active">
+            <option value="true" selected>Sim</option>
+            <option value="false">Não</option>
+          </select>
+        </label>
 
-  <!-- Modal de edição -->
-  <div class="modal" id="modal">
-    <div class="card">
-      <h3 style="margin:0 0 6px 0;">Detalhes da submissão</h3>
-      <div style="opacity:.7;font-size:13px;margin-bottom:12px;" id="modalMeta">—</div>
+        <div class="actions">
+          <button class="btn primary" type="submit">Criar usuário</button>
+        </div>
 
-      <div class="grid">
-        <div>
-          <label>Nome</label>
-          <input id="m_nome" />
-        </div>
-        <div>
-          <label>CPF</label>
-          <input id="m_cpf" />
-        </div>
-        <div>
-          <label>Nascimento</label>
-          <input id="m_nasc" placeholder="dd/mm/aaaa" />
-        </div>
-        <div>
-          <label>Status</label>
-          <input id="m_status" />
-        </div>
-        <div style="grid-column:1/-1;">
-          <label>Observação (admin)</label>
-          <textarea id="m_obs" rows="3" placeholder="Ex.: Documento RG ilegível, solicitar reenvio..."></textarea>
-        </div>
+        <div id="createMsg" class="msg"></div>
+      </form>
+    </section>
+
+    <section class="card">
+      <div class="card-title">
+        <div class="icon-badge">🔁</div>
+        <h2>Reset de senha</h2>
       </div>
 
-      <div class="footer">
-        <button id="m_close">Fechar</button>
-        <button id="m_save" class="primary">Salvar alterações</button>
-        <button id="m_delete" class="danger">Excluir</button>
+      <form id="resetForm" class="grid grid-3">
+        <label class="field">
+          <span>User ID (auth.users)</span>
+          <input id="rp_userid" placeholder="Cole o user_id do perfil" required />
+        </label>
+        <label class="field">
+          <span>CPF do usuário</span>
+          <input id="rp_cpf" inputmode="numeric" maxlength="11" required />
+        </label>
+
+        <div class="actions">
+          <button class="btn warn" type="submit">Resetar senha</button>
+        </div>
+
+        <div id="resetMsg" class="msg"></div>
+      </form>
+    </section>
+
+    <section class="card">
+      <div class="card-title">
+        <div class="icon-badge">✉️</div>
+        <h2>E-mail de notificação</h2>
       </div>
 
-      <hr style="margin:14px 0;border:none;border-top:1px solid #eee;" />
+      <form id="emailForm" class="grid">
+        <label class="field">
+          <span>Enviar para</span>
+          <input id="notifyEmail" type="email" placeholder="fidelis.carneiro@hc.eng.br" />
+          <small class="hint">Salva na tabela <b>app_settings</b> (id=1). Se RLS bloquear, me avise que eu te passo a policy.</small>
+        </label>
 
-      <div class="actions">
-        <button id="m_download_zip">Baixar ZIP (anexos)</button>
-        <button id="m_download_ficha">Baixar PDF Ficha</button>
-        <button id="m_download_plano">Baixar PDF Plano</button>
-      </div>
-      <div style="margin-top:8px; font-size:12px; opacity:.75;" id="m_dl_info"></div>
-    </div>
-  </div>
+        <div class="actions">
+          <button class="btn primary" type="submit">Salvar</button>
+        </div>
 
-  <script type="module" src="js/admin.js"></script>
+        <div id="emailMsg" class="msg"></div>
+      </form>
+    </section>
+
+    <footer class="footer">
+      <span>Usuário logado aparecerá no rodapé dos PDFs automaticamente.</span>
+    </footer>
+  </main>
+
+  <script type="module" src="./js/admin.js"></script>
 </body>
 </html>
