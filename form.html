@@ -1,580 +1,325 @@
-/* form.js (COMPLETO) – HC4 Admissão
-   - Draft + reenvio
-   - 2 PDFs (Cadastro + Plano) com dd/mm/aaaa
-   - ZIP numerado: "01 - NOME - FOTO 3X4.pdf", etc.
-   - Foto 3x4 normalizada (evita sair tombada)
-   - Envio para Edge Function submit-package via multipart/form-data
-*/
-
-import { supabase } from "./supabaseClient.js";
-import { FUNCTIONS } from "./config.js";
-import { makeCadastroPDF, makePlanoPDF } from "./pdf.js";
-import { buildZipFromUploads } from "./zip.js";
-import { scoreFileLegibility } from "./legibility.js";
-
-const $ = (id) => document.getElementById(id);
-
-let profile = null;
-let uploads = {}; // { key: [File, File...] }
-let fotoImageDataUrl = null; // dataURL normalizada (sempre “em pé”)
-let currentSubmissionId = null; // mantém draft/reenviar
-
-// =====================
-// Helpers
-// =====================
-function onlyDigits(s){ return String(s||"").replace(/\D+/g,""); }
-
-// input[type=date] vem yyyy-mm-dd => converter p/ dd/mm/aaaa
-function ddmmyyyy(dateStr){
-  if (!dateStr) return "";
-  const s = String(dateStr).trim();
-  // já está dd/mm/aaaa
-  if (/^\d{2}\/\d{2}\/\d{4}$/.test(s)) return s;
-  // yyyy-mm-dd
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)){
-    const [y,m,d] = s.split("-");
-    return `${d}/${m}/${y}`;
-  }
-  return s;
-}
-
-function normalizeNomeArquivo(nome){
-  return String(nome||"")
-    .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
-    .replace(/[^\w\s-]/g,"")
-    .replace(/\s+/g," ")
-    .trim();
-}
-
-function safeFileName(s){
-  return normalizeNomeArquivo(s).replace(/\s/g, " ").trim();
-}
-
-function setMsg(text, type=""){
-  const el = $("formMsg");
-  if (!el) return;
-  el.className = "msg " + (type||"");
-  el.textContent = text || "";
-}
-
-function getNotifyEmailsFromUI(){
-  // Se você tiver um campo no admin que escreve no app_settings, o formulário não precisa disso.
-  // Mas se quiser permitir no form (opcional), crie um input com id="notifyEmails"
-  const el = $("notifyEmails");
-  if (!el) return null;
-  const raw = String(el.value||"").trim();
-  if (!raw) return null;
-  const list = raw.split(/[;, \n]+/).map(s=>s.trim()).filter(Boolean);
-  return list.length ? list : null;
-}
-
-// =====================
-// Ordem dos anexos (com numeração)
-// =====================
-const DOCS_ORDER = [
-  { key:"foto_3x4", label:"FOTO 3X4" },
-  { key:"rg", label:"RG" },
-  { key:"cpf_doc", label:"CPF" },
-  { key:"titulo_eleitor", label:"TITULO DE ELEITOR" },
-  { key:"pis", label:"PIS/PASEP" },
-  { key:"reservista", label:"CERTIFICADO DE RESERVISTA" },
-  { key:"cert_nascimento", label:"CERTIDAO DE NASCIMENTO" },
-  { key:"cert_casamento", label:"CERTIDAO DE CASAMENTO" },
-  { key:"comprov_residencia", label:"COMPROVANTE DE RESIDENCIA" },
-  { key:"escolaridade", label:"CERTIFICADO DE ESCOLARIDADE" },
-  { key:"ctps", label:"CTPS" },
-  { key:"vacinacao", label:"COMPROVANTE DE VACINACAO" },
-  { key:"cartao_sus", label:"CARTAO DO SUS" },
-  { key:"curriculo", label:"CURRICULO" },
-  { key:"certificado", label:"CERTIFICADOS (QUANDO EXIGIDO)" },
-  { key:"cursos", label:"CURSOS" },
-  { key:"dados_bancarios", label:"DADOS BANCARIOS (ITAU)" },
-  { key:"cartao_transporte", label:"COPIA CARTAO DE TRANSPORTE" },
-  { key:"cnh", label:"CNH" },
-  { key:"cert_nasc_filhos", label:"CERTIDAO NASCIMENTO FILHOS" },
-  { key:"sus_dependentes", label:"CARTAO SUS DEPENDENTES" },
-  { key:"rgcpf_dependentes", label:"RG E CPF (CONJUGE + FILHOS)" },
-  { key:"vacina_filhos_menor7", label:"CADERNETA VACINACAO (<7)" },
-  { key:"comprov_escolar_7a14", label:"COMPROVANTE ESCOLAR (7 A 14)" },
-  { key:"registro_conselho", label:"REGISTRO CONSELHO PROFISSIONAL" },
-];
-
-// =====================
-// Foto: normalização (evita tombar)
-// =====================
-async function fileToDataURL(file){
-  return new Promise((resolve,reject)=>{
-    const r = new FileReader();
-    r.onload = () => resolve(r.result);
-    r.onerror = reject;
-    r.readAsDataURL(file);
-  });
-}
-
-async function normalizePhotoDataUrl(file){
-  // Normaliza via canvas com createImageBitmap (respeita orientação do arquivo em browsers modernos)
-  // E gera um JPEG “em pé”.
-  const blobUrl = URL.createObjectURL(file);
-  try{
-    let bmp = null;
-    try{
-      // imageOrientation: "from-image" ajuda com EXIF quando suportado
-      bmp = await createImageBitmap(file, { imageOrientation: "from-image" });
-    } catch {
-      // fallback: carregar via Image()
-      bmp = await new Promise((resolve,reject)=>{
-        const img = new Image();
-        img.onload = ()=> resolve(img);
-        img.onerror = reject;
-        img.src = blobUrl;
-      });
-    }
-
-    const w = bmp.width || bmp.naturalWidth;
-    const h = bmp.height || bmp.naturalHeight;
-
-    // Define tamanho final (quadrado 3x4 não precisa, mas mantém proporção)
-    const maxW = 600;
-    const scale = w > maxW ? (maxW / w) : 1;
-
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.round(w * scale);
-    canvas.height = Math.round(h * scale);
-
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
-
-    // retorna JPEG para ficar leve e consistente no PDF
-    return canvas.toDataURL("image/jpeg", 0.9);
-  } finally {
-    URL.revokeObjectURL(blobUrl);
-  }
-}
-
-// =====================
-// Draft / restore
-// =====================
-function getDraftKey(){
-  return `hc4_draft_${profile?.user_id || "anon"}`;
-}
-
-async function loadProfile(){
-  const { data: sess } = await supabase.auth.getSession();
-  const uid = sess?.session?.user?.id;
-  if (!uid) return null;
-
-  const { data, error } = await supabase
-    .from("profiles")
-    .select("*")
-    .eq("user_id", uid)
-    .maybeSingle();
-
-  if (error) throw error;
-  return data;
-}
-
-function collectRepeater(prefix){
-  // padrão esperado: campos com name="${prefix}[i].campo"
-  // Se você já tinha repeater pronto, isso preserva.
-  const out = [];
-  const all = document.querySelectorAll(`[data-repeater="${prefix}"] [data-row]`);
-  all.forEach((row)=>{
-    const obj = {};
-    row.querySelectorAll("[name]").forEach((inp)=>{
-      const name = inp.getAttribute("name");
-      const key = name.split(".").pop();
-      obj[key] = inp.value ?? "";
-    });
-    // limpa vazios
-    const hasAny = Object.values(obj).some(v => String(v||"").trim() !== "");
-    if (hasAny) out.push(obj);
-  });
-  return out;
-}
-
-function collectFormPayload(){
-  const fd = new FormData($("mainForm"));
-  const payload = {};
-  for (const [k,v] of fd.entries()){
-    payload[k] = String(v ?? "");
-  }
-
-  // normalizações
-  payload.cpf = onlyDigits(payload.cpf);
-  payload.nascimento = ddmmyyyy(payload.nascimento);
-  payload.rg_emissao = ddmmyyyy(payload.rg_emissao);
-  payload.cnh_vencimento = ddmmyyyy(payload.cnh_vencimento);
-  payload.data_casamento = ddmmyyyy(payload.data_casamento);
-
-  // repetidores
-  payload.dependentes_irpf = collectRepeater("dependentes_irpf");
-  payload.dependentes_plano = collectRepeater("dependentes_plano");
-
-  // rodapé: somente usuário (CPF/login) – você pediu sem nome
-  payload.usuario_rodape = profile?.cpf || "";
-
-  return payload;
-}
-
-function applyPayloadToForm(payload){
-  if (!payload) return;
-
-  Object.entries(payload).forEach(([k,v])=>{
-    const el = document.querySelector(`[name="${k}"]`);
-    if (!el) return;
-
-    // Não sobrescrever input file
-    if (el.type === "file") return;
-
-    // datas: se for dd/mm/aaaa, não tenta botar em input type=date.
-    // melhor manter como text no formulário, mas se for date e vier dd/mm/aaaa, converte p/ yyyy-mm-dd.
-    if (el.type === "date" && /^\d{2}\/\d{2}\/\d{4}$/.test(String(v))){
-      const [d,m,y] = String(v).split("/");
-      el.value = `${y}-${m}-${d}`;
-      return;
-    }
-    el.value = v ?? "";
-  });
-
-  // estado civil => mostra data casamento somente se casado
-  const civil = (payload.estado_civil || $("estadoCivil")?.value || "").toLowerCase();
-  toggleCasamento(civil);
-}
-
-async function upsertDraft(payload){
-  // Salva draft no banco (submissions), mantendo submission_id
-  const { data: sess } = await supabase.auth.getSession();
-  const uid = sess?.session?.user?.id;
-  if (!uid) throw new Error("Sem sessão.");
-
-  const cpf = payload.cpf;
-  const full_name = payload.nome || payload.full_name || payload.fullName || "";
-  const notify_emails = getNotifyEmailsFromUI();
-
-  const base = {
-    user_id: uid,
-    cpf,
-    full_name,
-    payload,
-    status: "DRAFT",
-  };
-
-  // tenta atualizar se já existir currentSubmissionId
-  if (currentSubmissionId){
-    const { data, error } = await supabase
-      .from("submissions")
-      .update({
-        payload,
-        cpf,
-        full_name,
-        notify_emails: notify_emails ?? undefined,
-        status: "DRAFT",
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", currentSubmissionId)
-      .select("id")
-      .maybeSingle();
-
-    if (error) throw error;
-    if (data?.id) return data.id;
-  }
-
-  // senão cria novo
-  const { data, error } = await supabase
-    .from("submissions")
-    .insert([{
-      ...base,
-      notify_emails: notify_emails ?? undefined,
-    }])
-    .select("id")
-    .single();
-
-  if (error) throw error;
-  return data.id;
-}
-
-async function loadLatestDraft(){
-  const { data: sess } = await supabase.auth.getSession();
-  const uid = sess?.session?.user?.id;
-  if (!uid) return null;
-
-  // tenta pegar o draft mais recente do user
-  const { data, error } = await supabase
-    .from("submissions")
-    .select("id,payload,status,created_at,updated_at")
-    .eq("user_id", uid)
-    .order("updated_at", { ascending:false })
-    .limit(1);
-
-  if (error) throw error;
-  return data?.[0] || null;
-}
-
-// =====================
-// Uploads (anexos)
-// =====================
-function registerUploadHandlers(){
-  DOCS_ORDER.forEach((d)=>{
-    const inp = document.querySelector(`[data-upload="${d.key}"]`);
-    if (!inp) return;
-
-    inp.addEventListener("change", ()=>{
-      const files = Array.from(inp.files || []);
-      uploads[d.key] = files;
-      // mostra contador se existir
-      const badge = document.querySelector(`[data-upload-badge="${d.key}"]`);
-      if (badge) badge.textContent = files.length ? `${files.length} arquivo(s)` : "Nenhum arquivo";
-    });
-  });
-
-  // Foto 3x4 (input específico)
-  const photoInp = $("photo3x4");
-  if (photoInp){
-    photoInp.addEventListener("change", async ()=>{
-      const f = photoInp.files?.[0];
-      if (!f) return;
-      setMsg("Processando foto 3x4…");
-      fotoImageDataUrl = await normalizePhotoDataUrl(f);
-
-      // Também registra como “upload” da chave foto_3x4 para entrar no ZIP como pdf/jpg (se você preferir pdf, ajusta no zip.js)
-      uploads["foto_3x4"] = [f];
-
-      const prev = $("photoPreview");
-      if (prev) prev.src = fotoImageDataUrl;
-
-      setMsg("Foto carregada ✅", "ok");
-    });
-  }
-}
-
-// =====================
-// Validações
-// =====================
-async function validateBeforeSend(payload){
-  if (!payload.cpf || payload.cpf.length !== 11) return "CPF inválido (11 dígitos).";
-  if (!payload.nome) return "Informe o nome.";
-
-  // Banco Itaú (você pediu fixo)
-  const agencia = (payload.agencia || "").trim();
-  const conta = (payload.conta || "").trim();
-  if (!agencia || !conta) return "Dados bancários (Itaú): informe agência e conta.";
-
-  if (!fotoImageDataUrl) return "Envie a foto 3x4.";
-
-  // Anexos obrigatórios mínimos (ajuste se quiser exigir TODOS)
-  // Aqui eu cobro pelo menos RG + CPF + CTPS + residência + escolaridade (exemplo).
-  const mustHave = ["rg","cpf_doc","ctps","comprov_residencia","escolaridade"];
-  for (const k of mustHave){
-    if (!uploads[k] || uploads[k].length === 0){
-      return `Faltando anexo obrigatório: ${DOCS_ORDER.find(x=>x.key===k)?.label || k}`;
-    }
-  }
-
-  // Legibilidade: força analisar PDFs também (scoreFileLegibility deve dar suporte)
-  let hasBad = false;
-  for (const d of DOCS_ORDER){
-    const files = uploads[d.key] || [];
-    for (const f of files){
-      const s = await scoreFileLegibility(f); // precisa suportar PDF internamente
-      if (s < 45) hasBad = true;
-    }
-  }
-  if (hasBad){
-    return "Alguns anexos parecem pouco legíveis. Troque por arquivos mais nítidos antes de enviar.";
-  }
-
-  return null;
-}
-
-// =====================
-// UI: estado civil => data casamento
-// =====================
-function toggleCasamento(valueLower){
-  const box = $("boxCasamento"); // container da data casamento (se existir)
-  const input = document.querySelector(`[name="data_casamento"]`);
-  const show = (valueLower || "").includes("casad");
-
-  if (box) box.style.display = show ? "" : "none";
-  if (input && !show) input.value = "";
-}
-
-function bindEstadoCivil(){
-  const el = document.querySelector(`[name="estado_civil"]`) || $("estadoCivil");
-  if (!el) return;
-  el.addEventListener("change", ()=>{
-    toggleCasamento(String(el.value||"").toLowerCase());
-  });
-  toggleCasamento(String(el.value||"").toLowerCase());
-}
-
-// =====================
-// Preview / Submit
-// =====================
-async function doPreview(){
-  setMsg("Gerando prévias…");
-  const payload = collectFormPayload();
-
-  const assinaturaCanvas = $("sigCanvas");
-  const assinatura = assinaturaCanvas ? assinaturaCanvas.toDataURL("image/png") : null;
-
-  const cadastroBlob = await makeCadastroPDF(payload, fotoImageDataUrl, assinatura);
-  const planoBlob = await makePlanoPDF(payload, fotoImageDataUrl, assinatura);
-
-  window.open(URL.createObjectURL(cadastroBlob), "_blank");
-  window.open(URL.createObjectURL(planoBlob), "_blank");
-
-  setMsg("Prévia gerada ✅ (duas abas abertas)", "ok");
-}
-
-async function doSaveDraft(){
-  const payload = collectFormPayload();
-  setMsg("Salvando rascunho…");
-
-  // salva draft no banco (submissions)
-  const id = await upsertDraft(payload);
-  currentSubmissionId = id;
-
-  setMsg("Rascunho salvo ✅ Você pode sair e voltar depois.", "ok");
-}
-
-async function doSubmit(){
-  const payload = collectFormPayload();
-  setMsg("Validando…");
-
-  const err = await validateBeforeSend(payload);
-  if (err) { setMsg(err, "err"); return; }
-
-  setMsg("Salvando (draft) antes de enviar…");
-  // garante que exista submission_id
-  currentSubmissionId = await upsertDraft(payload);
-
-  setMsg("Gerando PDFs e ZIP…");
-
-  const assinaturaCanvas = $("sigCanvas");
-  const assinatura = assinaturaCanvas ? assinaturaCanvas.toDataURL("image/png") : null;
-
-  const pdfCadastro = await makeCadastroPDF(payload, fotoImageDataUrl, assinatura);
-  const pdfPlano = await makePlanoPDF(payload, fotoImageDataUrl, assinatura);
-
-  const nomeBase = safeFileName(payload.nome);
-  const pdfCadastroName = `${nomeBase} - Ficha Cadastral.pdf`;
-  const pdfPlanoName = `${nomeBase} - Plano de Saúde.pdf`;
-
-  // ZIP com numeração + nome
-  // Observação: buildZipFromUploads precisa aceitar numeração.
-  // Se seu zip.js antigo não aceitava, ele vai ignorar e ainda assim criar ZIP.
-  const zipBlob = await buildZipFromUploads(nomeBase, uploads, DOCS_ORDER, { numbered: true });
-
-  setMsg("Enviando para o servidor…");
-
-  const { data: sess } = await supabase.auth.getSession();
-  const token = sess?.session?.access_token;
-  if (!token){ setMsg("Sessão expirada. Faça login novamente.", "err"); return; }
-
-  const notifyEmails = getNotifyEmailsFromUI(); // opcional (admin geralmente define no app_settings)
-  const formData = new FormData();
-  formData.append("submission_id", currentSubmissionId);
-  formData.append("payload", JSON.stringify(payload));
-  if (notifyEmails) formData.append("notify_emails", JSON.stringify(notifyEmails));
-
-  formData.append("pdfCadastro", new File([pdfCadastro], pdfCadastroName, { type:"application/pdf" }));
-  formData.append("pdfPlano", new File([pdfPlano], pdfPlanoName, { type:"application/pdf" }));
-  formData.append("zipDocs", new File([zipBlob], `${nomeBase} - Documentos.zip`, { type:"application/zip" }));
-
-  // também envia a foto normalizada (opcional, mas útil)
-  if (fotoImageDataUrl){
-    const fotoBlob = await (await fetch(fotoImageDataUrl)).blob();
-    formData.append("fotoNormalizada", new File([fotoBlob], `${nomeBase} - Foto 3x4.jpg`, { type:"image/jpeg" }));
-  }
-
-  const endpoint = `${supabase.functions.url}/${FUNCTIONS.submitPackage}`;
-  const res = await fetch(endpoint, {
-    method: "POST",
-    headers: { "Authorization": `Bearer ${token}` },
-    body: formData
-  });
-
-  const out = await res.json().catch(()=> ({}));
-  if (!res.ok){
-    // marca erro no draft
-    try{
-      await supabase.from("submissions")
-        .update({ status:"EMAIL_FALHOU", error_message: out?.error || "Falha ao enviar", updated_at: new Date().toISOString() })
-        .eq("id", currentSubmissionId);
-    } catch(_){}
-    setMsg(out?.error || "Falha ao enviar (veja logs da Edge Function).", "err");
-    return;
-  }
-
-  // sucesso
-  try{
-    await supabase.from("submissions")
-      .update({ status:"ENVIADO", error_message: null, updated_at: new Date().toISOString() })
-      .eq("id", currentSubmissionId);
-  } catch(_){}
-
-  setMsg(`Enviado ✅ Protocolo: ${out.submission_id || currentSubmissionId}`, "ok");
-}
-
-// =====================
-// Init
-// =====================
-async function init(){
-  setMsg("Carregando…");
-
-  // sessão obrigatória
-  const { data: sess } = await supabase.auth.getSession();
-  if (!sess?.session){
-    window.location.href = "login.html";
-    return;
-  }
-
-  profile = await loadProfile();
-  if (!profile){
-    setMsg("Perfil não encontrado. Procure o administrador.", "err");
-    return;
-  }
-  if (profile.is_active === false){
-    setMsg("Usuário inativo. Procure o administrador.", "err");
-    return;
-  }
-
-  // Bind
-  registerUploadHandlers();
-  bindEstadoCivil();
-
-  // Carrega draft mais recente do banco
-  const latest = await loadLatestDraft();
-  if (latest?.payload){
-    currentSubmissionId = latest.id;
-    applyPayloadToForm(latest.payload);
-    setMsg("Rascunho carregado ✅ Você pode continuar o preenchimento.", "ok");
-  } else {
-    setMsg("", "");
-  }
-
-  // Botões (se existirem)
-  const btnPrev = $("btnPreview");
-  if (btnPrev) btnPrev.addEventListener("click", (e)=>{ e.preventDefault(); doPreview(); });
-
-  const btnDraft = $("btnSaveDraft");
-  if (btnDraft) btnDraft.addEventListener("click", (e)=>{ e.preventDefault(); doSaveDraft(); });
-
-  // Submit do form
-  const form = $("mainForm");
-  if (form){
-    form.addEventListener("submit", (e)=>{
-      e.preventDefault();
-      doSubmit();
-    });
-  }
-
-  // Se você tiver um botão dedicado (ex.: btnSend)
-  const btnSend = $("btnSend");
-  if (btnSend) btnSend.addEventListener("click", (e)=>{ e.preventDefault(); doSubmit(); });
-}
-
-init().catch((err)=>{
-  console.error(err);
-  setMsg(err?.message || "Erro ao iniciar.", "err");
-});
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>HC4 • Ficha de Admissão</title>
+  <link rel="stylesheet" href="./css/style.css" />
+  <link rel="icon" href="./assets/logo-hc4.png" />
+</head>
+<body>
+  <div class="bg-shapes"></div>
+
+  <main class="shell">
+    <header class="topbar">
+      <img class="logo" src="./assets/logo-hc4.png" alt="HC4" />
+      <div class="topbar-text">
+        <h1>Ficha de Admissão</h1>
+        <p id="whoami">Carregando…</p>
+      </div>
+      <div class="topbar-actions">
+        <a class="btn" href="./admin.html" id="adminLink" style="display:none;">Admin</a>
+        <button class="btn" id="btnLogout">Sair</button>
+      </div>
+    </header>
+
+    <!-- DADOS PESSOAIS -->
+    <section class="card">
+      <div class="card-title">
+        <div class="icon-badge">🧑‍💼</div>
+        <h2>Dados do Colaborador</h2>
+      </div>
+
+      <form id="mainForm">
+        <div class="grid grid-3">
+          <label class="field">
+            <span>Nome completo</span>
+            <input name="nome" required />
+          </label>
+
+          <label class="field">
+            <span>CPF</span>
+            <input name="cpf" inputmode="numeric" maxlength="11" required />
+            <small class="hint">Somente números, 11 dígitos</small>
+          </label>
+
+          <label class="field">
+            <span>Data de nascimento</span>
+            <input name="nascimento" type="date" required />
+            <small class="hint">No PDF sai dd/mm/aaaa</small>
+          </label>
+
+          <label class="field">
+            <span>E-mail</span>
+            <input name="email" type="email" />
+          </label>
+
+          <label class="field">
+            <span>Telefone</span>
+            <input name="tel" placeholder="(xx) xxxxx-xxxx" />
+          </label>
+
+          <label class="field">
+            <span>Estado civil</span>
+            <select name="estado_civil" id="estadoCivil" required>
+              <option value="">Selecione</option>
+              <option>Solteiro(a)</option>
+              <option>Casado(a)</option>
+              <option>União Estável</option>
+              <option>Divorciado(a)</option>
+              <option>Viúvo(a)</option>
+            </select>
+          </label>
+
+          <label class="field" id="wrapDataCasamento" style="display:none;">
+            <span>Data de casamento</span>
+            <input name="data_casamento" type="date" />
+          </label>
+
+          <label class="field">
+            <span>Nome da mãe</span>
+            <input name="mae" />
+          </label>
+
+          <label class="field">
+            <span>Nome do pai</span>
+            <input name="pai" />
+          </label>
+        </div>
+
+        <div class="grid grid-3">
+          <label class="field">
+            <span>Naturalidade (cidade)</span>
+            <input name="naturalidade_cidade" />
+          </label>
+          <label class="field">
+            <span>Naturalidade (UF)</span>
+            <input name="naturalidade_uf" maxlength="2" placeholder="MG" />
+          </label>
+
+          <label class="field">
+            <span>Indicação (nome)</span>
+            <input name="indicacao_nome" />
+          </label>
+          <label class="field">
+            <span>Indicação (telefone)</span>
+            <input name="indicacao_tel" placeholder="(xx) xxxxx-xxxx" />
+          </label>
+
+          <label class="field">
+            <span>Contato de emergência (nome)</span>
+            <input name="emerg_nome" required />
+          </label>
+          <label class="field">
+            <span>Contato de emergência (telefone)</span>
+            <input name="emerg_tel" placeholder="(xx) xxxxx-xxxx" required />
+          </label>
+        </div>
+
+        <div class="grid grid-3">
+          <label class="field">
+            <span>RG (número)</span>
+            <input name="rg_numero" />
+          </label>
+          <label class="field">
+            <span>RG (órgão emissor)</span>
+            <input name="rg_orgao" placeholder="SSP" />
+          </label>
+          <label class="field">
+            <span>RG (UF)</span>
+            <input name="rg_uf" maxlength="2" placeholder="MG" />
+          </label>
+          <label class="field">
+            <span>Data de emissão do RG</span>
+            <input name="rg_emissao" type="date" />
+          </label>
+        </div>
+
+        <div class="grid grid-3">
+          <label class="field">
+            <span>CNH (número)</span>
+            <input name="cnh_numero" />
+          </label>
+          <label class="field">
+            <span>CNH (categoria)</span>
+            <input name="cnh_categoria" placeholder="B" />
+          </label>
+          <label class="field">
+            <span>Vencimento CNH</span>
+            <input name="cnh_vencimento" type="date" />
+          </label>
+        </div>
+
+        <div class="divider"></div>
+
+        <!-- ENDEREÇO -->
+        <div class="card-subtitle">
+          <div class="icon-badge sm">🏠</div>
+          <h3>Endereço</h3>
+        </div>
+
+        <div class="grid grid-3">
+          <label class="field">
+            <span>Logradouro (Rua/Avenida)</span>
+            <input name="logradouro" required />
+          </label>
+          <label class="field">
+            <span>Número</span>
+            <input name="numero" required />
+          </label>
+          <label class="field">
+            <span>Complemento</span>
+            <input name="complemento" />
+          </label>
+          <label class="field">
+            <span>Bairro</span>
+            <input name="bairro" required />
+          </label>
+          <label class="field">
+            <span>Cidade</span>
+            <input name="cidade" required />
+          </label>
+          <label class="field">
+            <span>UF</span>
+            <input name="end_uf" maxlength="2" placeholder="MG" required />
+          </label>
+          <label class="field">
+            <span>CEP</span>
+            <input name="cep" inputmode="numeric" maxlength="8" required />
+          </label>
+          <label class="field">
+            <span>Local de referência</span>
+            <input name="referencia" />
+          </label>
+        </div>
+
+        <div class="divider"></div>
+
+        <!-- DADOS BANCÁRIOS -->
+        <div class="card-subtitle">
+          <div class="icon-badge sm">🏦</div>
+          <h3>Dados Bancários</h3>
+        </div>
+
+        <div class="grid grid-3">
+          <label class="field">
+            <span>Banco</span>
+            <input name="banco" value="Itaú" readonly />
+            <small class="hint">Obrigatório: Banco Itaú</small>
+          </label>
+          <label class="field">
+            <span>Agência</span>
+            <input name="agencia" required />
+          </label>
+          <label class="field">
+            <span>Conta</span>
+            <input name="conta" required />
+          </label>
+        </div>
+
+        <div class="divider"></div>
+
+        <!-- DEPENDENTES IRPF -->
+        <div class="card-subtitle">
+          <div class="icon-badge sm">👨‍👩‍👧‍👦</div>
+          <h3>Dependentes IRPF</h3>
+        </div>
+        <div id="depsIRPF" class="repeater"></div>
+        <button class="btn" type="button" id="addDepIR">+ Adicionar dependente IRPF</button>
+
+        <div class="divider"></div>
+
+        <!-- PLANO DE SAÚDE -->
+        <div class="card-subtitle">
+          <div class="icon-badge sm">🩺</div>
+          <h3>Plano de Saúde</h3>
+        </div>
+
+        <div class="grid grid-3">
+          <label class="field">
+            <span>Possui plano atualmente?</span>
+            <select name="plano_possui">
+              <option value="Não" selected>Não</option>
+              <option value="Sim">Sim</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Operadora</span>
+            <input name="plano_operadora" />
+          </label>
+          <label class="field">
+            <span>Matrícula / Nº Beneficiário</span>
+            <input name="plano_matricula" />
+          </label>
+        </div>
+
+        <div class="card-subtitle" style="margin-top:10px;">
+          <div class="icon-badge sm">🧾</div>
+          <h3>Dependentes Plano de Saúde</h3>
+        </div>
+        <div id="depsPLANO" class="repeater"></div>
+        <button class="btn" type="button" id="addDepPL">+ Adicionar dependente Plano</button>
+
+        <div class="divider"></div>
+
+        <!-- FOTO + ASSINATURA -->
+        <div class="card-subtitle">
+          <div class="icon-badge sm">📸</div>
+          <h3>Foto e Assinatura</h3>
+        </div>
+
+        <div class="grid grid-2">
+          <label class="field">
+            <span>Foto 3x4 (imagem)</span>
+            <input type="file" id="fotoFile" accept="image/*" required />
+            <small class="hint">Vai aparecer como um quadrado nos dois PDFs.</small>
+          </label>
+
+          <div class="field">
+            <span>Assinatura (use mouse ou dedo)</span>
+            <div class="sig-wrap">
+              <canvas id="sigCanvas" width="700" height="220"></canvas>
+              <div class="sig-actions">
+                <button class="btn" type="button" id="sigClear">Limpar</button>
+              </div>
+            </div>
+            <small class="hint">Assinatura única usada nos 2 PDFs. Não precisa nome.</small>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <!-- ANEXOS -->
+        <div class="card-subtitle">
+          <div class="icon-badge sm">📎</div>
+          <h3>Anexos (PDF legível)</h3>
+        </div>
+
+        <div class="note">
+          ✅ O sistema avalia legibilidade (PDF e imagem). Se a pontuação estiver baixa, ele avisa antes de enviar.
+        </div>
+
+        <div id="docs" class="docs"></div>
+
+        <div class="actions bottom">
+          <button class="btn" type="button" id="btnPreview">Pré-visualizar PDFs</button>
+          <button class="btn primary" type="submit" id="btnSend">Gerar PDFs + ZIP + Enviar</button>
+        </div>
+
+        <div id="formMsg" class="msg"></div>
+      </form>
+    </section>
+
+    <footer class="footer">
+      <span id="footerUser"></span>
+    </footer>
+  </main>
+
+  <!-- libs -->
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.min.mjs" type="module"></script>
+
+  <script type="module" src="./js/form.js"></script>
+</body>
+</html>
