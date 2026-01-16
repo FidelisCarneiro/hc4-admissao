@@ -1,190 +1,119 @@
-import { supabase } from "./supabase.js";
+import { supabase } from "./supabaseClient.js";
+import { FUNCTIONS } from "./config.js";
 
-const REQUIRED_DOCS = [
-  "foto","rg","cpf","titulo","pis","reservista","nascimento","casamento","residencia","escolaridade",
-  "ctps","vacinacao","sus","curriculo","certificado","cursos","dados_banc","transporte","cnh",
-  "filhos_nasc","sus_dep","rgcpf_fam","vac_filhos","esc_filhos","conselho"
-];
+const $ = (id) => document.getElementById(id);
+function onlyDigits(v){ return (v||"").replace(/\D/g,""); }
+function normRole(role){ return String(role||"").trim().toLowerCase(); }
 
-const rowsEl = document.getElementById("rows");
-const qEl = document.getElementById("q");
-const countEl = document.getElementById("count");
-const btnRefresh = document.getElementById("btnRefresh");
+async function requireAdmin(){
+  const { data: sess } = await supabase.auth.getSession();
+  if (!sess?.session?.user) { window.location.href = "./index.html"; return; }
 
-const modal = document.getElementById("modal");
-const mClose = document.getElementById("m_close");
-const mSave = document.getElementById("m_save");
-const mDelete = document.getElementById("m_delete");
-const mMeta = document.getElementById("modalMeta");
-const mNome = document.getElementById("m_nome");
-const mCpf = document.getElementById("m_cpf");
-const mNasc = document.getElementById("m_nasc");
-const mStatus = document.getElementById("m_status");
-const mObs = document.getElementById("m_obs");
+  const uid = sess.session.user.id;
+  const { data: prof } = await supabase
+    .from("profiles")
+    .select("full_name,role")
+    .eq("user_id", uid)
+    .single();
 
-const mZip = document.getElementById("m_download_zip");
-const mFicha = document.getElementById("m_download_ficha");
-const mPlano = document.getElementById("m_download_plano");
-const mDlInfo = document.getElementById("m_dl_info");
-
-let current = null;
-
-function fmtDateBR(v){
-  if(!v) return "";
-  if(/^\d{4}-\d{2}-\d{2}$/.test(v)){
-    const [y,m,d]=v.split("-");
-    return `${d}/${m}/${y}`;
-  }
-  return v;
-}
-
-function docStatusBadge(uploads){
-  const up = uploads || {};
-  const okCount = REQUIRED_DOCS.filter(k => !!up[k]).length;
-  const total = REQUIRED_DOCS.length;
-  const missing = total - okCount;
-  const klass = missing === 0 ? "badge ok" : (okCount === 0 ? "badge bad" : "badge warn");
-  return `<span class="${klass}">${okCount}/${total} (${missing} faltando)</span>`;
-}
-
-function statusBadge(status){
-  const s = (status||"").toUpperCase();
-  const klass =
-    s.includes("DRAFT") ? "badge warn" :
-    s.includes("EMAIL_ENVIADO") || s.includes("ENVIADO") ? "badge ok" :
-    s.includes("FALHOU") ? "badge bad" : "badge";
-  return `<span class="${klass}">${status || "-"}</span>`;
-}
-
-async function adminList(query){
-  const { data, error } = await supabase.functions.invoke("admin-list-submissions", {
-    body: { q: query || "" }
-  });
-  if(error) throw error;
-  return data.items || [];
-}
-
-function render(items){
-  if(!items.length){
-    rowsEl.innerHTML = `<tr><td colspan="7" style="opacity:.7;">Nenhum registro.</td></tr>`;
-    countEl.textContent = "0 registros";
+  if (!prof || normRole(prof.role) !== "admin") {
+    window.location.href = "./form.html";
     return;
   }
 
-  countEl.textContent = `${items.length} registros`;
+  $("whoami").textContent = `Logado como: ${prof.full_name} • ADMIN`;
+}
+await requireAdmin();
 
-  rowsEl.innerHTML = items.map(it => {
-    const nome = it.nome || "";
-    const cpf = it.cpf || "";
-    const nasc = fmtDateBR(it.nascimento);
-    const docs = docStatusBadge(it.uploads);
-    const st = statusBadge(it.status);
-    const envio = it.status?.includes("EMAIL") ? "E-mail" : (it.status||"—");
-    return `
-      <tr>
-        <td>${nome}</td>
-        <td>${cpf}</td>
-        <td>${nasc}</td>
-        <td>${st}</td>
-        <td>${docs}</td>
-        <td>${envio}</td>
-        <td>
-          <div class="actions">
-            <button data-open="${it.id}" class="primary">Abrir</button>
-          </div>
-        </td>
-      </tr>
-    `;
-  }).join("");
+$("btnLogout").addEventListener("click", async () => {
+  await supabase.auth.signOut();
+  window.location.href = "./index.html";
+});
 
-  rowsEl.querySelectorAll("[data-open]").forEach(btn => {
-    btn.addEventListener("click", () => openModal(btn.getAttribute("data-open")));
+$("createUserForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const msg = $("createMsg"); msg.className="msg"; msg.textContent="Criando…";
+
+  const full_name = $("cu_name").value.trim();
+  const cpf = onlyDigits($("cu_cpf").value);
+
+  // IMPORTANTE: salvar em minúsculo
+  const role = normRole($("cu_role").value); // admin | preenchedor
+  const is_active = $("cu_active").value === "true";
+
+  if (cpf.length !== 11) { msg.className="msg err"; msg.textContent="CPF inválido (11 dígitos)."; return; }
+
+  const { data: sess } = await supabase.auth.getSession();
+  const token = sess?.session?.access_token;
+
+  const res = await fetch(`${supabase.functions.url}/${FUNCTIONS.adminCreateUser}`, {
+    method: "POST",
+    headers: { "Content-Type":"application/json", "Authorization": `Bearer ${token}` },
+    body: JSON.stringify({ cpf, full_name, role, is_active })
   });
-}
 
-async function refresh(){
-  rowsEl.innerHTML = `<tr><td colspan="7" style="opacity:.7;">Carregando...</td></tr>`;
-  const items = await adminList(qEl.value.trim());
-  render(items);
-}
+  const out = await res.json();
+  if (!res.ok) { msg.className="msg err"; msg.textContent = out.error || "Erro"; return; }
 
-btnRefresh.addEventListener("click", refresh);
-qEl.addEventListener("input", () => {
-  // debounce simples
-  clearTimeout(window.__t);
-  window.__t = setTimeout(refresh, 250);
+  msg.className="msg ok";
+  msg.textContent = `Usuário criado ✅ Email: ${out.email} • Senha temporária: ${out.senha_temporaria}`;
 });
 
-mClose.addEventListener("click", () => modal.classList.remove("open"));
+$("resetForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const msg = $("resetMsg"); msg.className="msg"; msg.textContent="Resetando…";
 
-async function openModal(id){
-  const { data, error } = await supabase.functions.invoke("admin-get-submission", { body: { id } });
-  if(error) return alert("Erro ao abrir (ver console)."), console.error(error);
-  current = data.item;
+  const user_id = $("rp_userid").value.trim();
+  const cpf = onlyDigits($("rp_cpf").value);
+  if (!user_id) { msg.className="msg err"; msg.textContent="Informe user_id."; return; }
+  if (cpf.length !== 11) { msg.className="msg err"; msg.textContent="CPF inválido."; return; }
 
-  mMeta.textContent = `ID: ${current.id} • Atualizado: ${current.updated_at || "-"}`;
-  mNome.value = current.data?.nome || "";
-  mCpf.value = current.data?.cpf || "";
-  mNasc.value = fmtDateBR(current.data?.nascimento || "");
-  mStatus.value = current.status || "";
-  mObs.value = current.admin_note || "";
+  const { data: sess } = await supabase.auth.getSession();
+  const token = sess?.session?.access_token;
 
-  mDlInfo.textContent = "";
-  modal.classList.add("open");
-}
-
-mSave.addEventListener("click", async () => {
-  if(!current) return;
-  const payload = {
-    id: current.id,
-    patch: {
-      status: mStatus.value,
-      admin_note: mObs.value,
-      data: {
-        ...(current.data || {}),
-        nome: mNome.value,
-        cpf: mCpf.value,
-        nascimento: mNasc.value
-      }
-    }
-  };
-
-  const { error } = await supabase.functions.invoke("admin-update-submission", { body: payload });
-  if(error) return alert("Erro ao salvar (ver console)."), console.error(error);
-
-  alert("Salvo!");
-  modal.classList.remove("open");
-  await refresh();
-});
-
-mDelete.addEventListener("click", async () => {
-  if(!current) return;
-  if(!confirm("Excluir esta submissão?")) return;
-
-  const { error } = await supabase.functions.invoke("admin-delete-submission", { body: { id: current.id } });
-  if(error) return alert("Erro ao excluir (ver console)."), console.error(error);
-
-  alert("Excluído!");
-  modal.classList.remove("open");
-  await refresh();
-});
-
-async function download(kind){
-  if(!current) return;
-  const { data, error } = await supabase.functions.invoke("admin-download-links", {
-    body: { id: current.id, kind }
+  const res = await fetch(`${supabase.functions.url}/${FUNCTIONS.adminResetPassword}`, {
+    method: "POST",
+    headers: { "Content-Type":"application/json", "Authorization": `Bearer ${token}` },
+    body: JSON.stringify({ user_id, cpf })
   });
-  if(error) return alert("Erro ao gerar link (ver console)."), console.error(error);
 
-  if(!data?.url){
-    mDlInfo.textContent = "Arquivo ainda não gerado para esta submissão.";
-    return;
+  const out = await res.json();
+  if (!res.ok) { msg.className="msg err"; msg.textContent = out.error || "Erro"; return; }
+
+  msg.className="msg ok";
+  msg.textContent = `Senha resetada ✅ Nova senha temporária: ${out.senha_temporaria}`;
+});
+
+function parseEmails(text){
+  return (text || "")
+    .split(/[,;\n]/g)
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
+async function loadNotify(){
+  const { data, error } = await supabase
+    .from("app_settings")
+    .select("notification_emails")
+    .eq("id", 1)
+    .single();
+
+  if (!error && data){
+    $("notifyEmail").value = (data.notification_emails || []).join(", ");
   }
-  window.open(data.url, "_blank");
 }
+loadNotify();
 
-mZip.addEventListener("click", () => download("zip"));
-mFicha.addEventListener("click", () => download("pdf_ficha"));
-mPlano.addEventListener("click", () => download("pdf_plano"));
+$("emailForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const msg = $("emailMsg"); msg.className="msg"; msg.textContent="Salvando…";
 
-refresh().catch(console.error);
+  const emails = parseEmails($("notifyEmail").value);
+
+  const { error } = await supabase
+    .from("app_settings")
+    .upsert({ id: 1, notification_emails: emails });
+
+  if (error) { msg.className="msg err"; msg.textContent = "Falha (RLS?): " + error.message; return; }
+  msg.className="msg ok"; msg.textContent="Salvo ✅";
+});
